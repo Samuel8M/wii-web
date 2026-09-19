@@ -136,6 +136,14 @@ let poseDetected = false;
 let leftHandDetected = false;
 let rightHandDetected = false;
 let lastSwingSpeed = 0;
+// A hand has to be tracked continuously for a bit, AND read as a clear fist
+// for a few consecutive frames, before it's trusted enough to start a grab.
+// This is what keeps a brand-new or jittery hand reading from instantly
+// grabbing/dragging the ball around.
+let handSeenSince = { left: null, right: null };
+let closedStreak = { left: 0, right: 0 };
+const HAND_STABILIZE_MS = 400;
+const CLOSED_STREAK_REQUIRED = 4;
 
 // Rough open/closed-fist heuristic: for each of the 4 non-thumb fingers,
 // compare the fingertip's distance from the wrist to its middle knuckle's
@@ -311,9 +319,27 @@ function stopBowling() {
 
 function onHolisticResults(results) {
   if (!bowlingActive) return;
+  const now = performance.now();
   poseDetected = !!results.poseLandmarks;
   leftHandDetected = !!results.leftHandLandmarks;
   rightHandDetected = !!results.rightHandLandmarks;
+
+  // Track how long each hand has been continuously visible, and how many
+  // consecutive frames it's read as a clear fist — both gate whether a grab
+  // is allowed to start, so a hand that just appeared (or is flickering
+  // between readings) can't instantly grab the ball.
+  ['left', 'right'].forEach((side) => {
+    const hand = side === 'left' ? results.leftHandLandmarks : results.rightHandLandmarks;
+    if (hand) {
+      if (handSeenSince[side] == null) handSeenSince[side] = now;
+      const closed = isHandClosed(hand);
+      if (closed === true) closedStreak[side] = Math.min(closedStreak[side] + 1, 999);
+      else if (closed === false) closedStreak[side] = 0;
+    } else {
+      handSeenSince[side] = null;
+      closedStreak[side] = 0;
+    }
+  });
 
   bOverlayCtx.save();
   bOverlayCtx.clearRect(0, 0, bOverlay.width, bOverlay.height);
@@ -332,19 +358,25 @@ function onHolisticResults(results) {
     drawConnectors(bOverlayCtx, hand, HAND_CONNECTIONS, { color, lineWidth: 3 });
     // eslint-disable-next-line no-undef
     drawLandmarks(bOverlayCtx, hand, { color: '#ffffff', radius: 2 });
+
+    if (ballState === 'idle' && handSeenSince[side] != null) {
+      const warmup = Math.min(1, (now - handSeenSince[side]) / HAND_STABILIZE_MS);
+      if (warmup < 1) {
+        drawProgressRing(hand[0].x * bOverlay.width, hand[0].y * bOverlay.height, warmup, 'rgba(255,255,255,0.7)');
+      }
+    }
   });
   if (ballState === 'grabbing') {
     const hand = heldSide === 'left' ? results.leftHandLandmarks : results.rightHandLandmarks;
     if (hand) {
-      const progress = Math.min(1, (performance.now() - grabConfirmStart) / GRAB_CONFIRM_MS);
-      drawGrabProgressRing(hand[0].x * bOverlay.width, hand[0].y * bOverlay.height, progress);
+      const progress = Math.min(1, (now - grabConfirmStart) / GRAB_CONFIRM_MS);
+      drawProgressRing(hand[0].x * bOverlay.width, hand[0].y * bOverlay.height, progress, '#4fff8f');
     }
   }
   bOverlayCtx.restore();
 
-  const now = performance.now();
   if (ballState === 'idle' && !ball.moving) {
-    evaluateGrab(results);
+    evaluateGrab(results, now);
   } else if (ballState === 'grabbing') {
     updateGrabbing(results, now);
   } else if (ballState === 'held') {
@@ -354,7 +386,7 @@ function onHolisticResults(results) {
   drawDebugHud();
 }
 
-function drawGrabProgressRing(cx, cy, progress) {
+function drawProgressRing(cx, cy, progress, color) {
   const r = 34;
   bOverlayCtx.save();
   bOverlayCtx.lineWidth = 6;
@@ -362,26 +394,26 @@ function drawGrabProgressRing(cx, cy, progress) {
   bOverlayCtx.beginPath();
   bOverlayCtx.arc(cx, cy, r, 0, Math.PI * 2);
   bOverlayCtx.stroke();
-  bOverlayCtx.strokeStyle = '#4fff8f';
+  bOverlayCtx.strokeStyle = color;
   bOverlayCtx.beginPath();
   bOverlayCtx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
   bOverlayCtx.stroke();
   bOverlayCtx.restore();
 }
 
-function evaluateGrab(results) {
+function evaluateGrab(results, now) {
   for (const side of ['left', 'right']) {
     const hand = side === 'left' ? results.leftHandLandmarks : results.rightHandLandmarks;
     if (!hand) continue;
     if (hand[0].y < GRAB_MIN_Y) continue; // hand held up high — not reaching for the ball
-    if (isHandClosed(hand) === true) {
-      ballState = 'grabbing';
-      heldSide = side;
-      grabConfirmStart = performance.now();
-      wristHistory.left = [];
-      wristHistory.right = [];
-      return;
-    }
+    if (!handSeenSince[side] || now - handSeenSince[side] < HAND_STABILIZE_MS) continue; // still stabilizing this hand
+    if (closedStreak[side] < CLOSED_STREAK_REQUIRED) continue; // needs a few consistent fist frames, not one flicker
+    ballState = 'grabbing';
+    heldSide = side;
+    grabConfirmStart = now;
+    wristHistory.left = [];
+    wristHistory.right = [];
+    return;
   }
 }
 
