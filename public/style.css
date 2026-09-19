@@ -1,0 +1,147 @@
+:root {
+  --bg: #0b0e1a;
+  --panel: #141a2e;
+  --accent: #4fd1ff;
+  --accent2: #ff5fa2;
+  --good: #4fff8f;
+  --bad: #ff5f5f;
+  --text: #eef2ff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  height: 100%;
+  overflow: hidden;
+}
+
+.screen {
+  display: none;
+  width: 100vw;
+  height: 100vh;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+}
+.screen.active { display: flex; }
+
+h1 { font-size: 3rem; margin: 0 0 8px; letter-spacing: 2px; }
+h1 span { color: var(--accent); }
+.subtitle { opacity: 0.7; margin-bottom: 32px; }
+
+.code-box {
+  font-size: 4rem;
+  letter-spacing: 12px;
+  font-weight: 800;
+  background: var(--panel);
+  border-radius: 16px;
+  padding: 16px 32px;
+  color: var(--accent);
+  margin-bottom: 16px;
+}
+
+#qrcode { background: white; padding: 12px; border-radius: 12px; margin-bottom: 24px; }
+
+.player-list {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin: 16px 0 32px;
+  min-height: 48px;
+}
+.player-chip {
+  background: var(--panel);
+  border: 2px solid var(--accent);
+  border-radius: 999px;
+  padding: 8px 20px;
+  font-weight: 600;
+}
+.player-chip.dead { border-color: var(--bad); opacity: 0.5; text-decoration: line-through; }
+
+.btn-row { display: flex; gap: 16px; }
+button {
+  font-size: 1.2rem;
+  font-weight: 700;
+  padding: 16px 32px;
+  border-radius: 12px;
+  border: none;
+  background: var(--accent);
+  color: #001018;
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+button:active { transform: scale(0.96); }
+button:disabled { opacity: 0.35; cursor: not-allowed; }
+button.secondary { background: var(--panel); color: var(--text); border: 2px solid var(--accent); }
+button.big { font-size: 1.8rem; padding: 28px 48px; width: 100%; }
+
+/* Bowling */
+#screen-bowling { position: relative; }
+#bowling-video { display: none; }
+#bowling-wrap { position: relative; width: min(90vw, 1000px); }
+#bowling-canvas, #bowling-overlay {
+  position: absolute; top: 0; left: 0; width: 100%; border-radius: 16px;
+}
+#bowling-overlay { pointer-events: none; }
+.turn-banner {
+  position: absolute; top: -64px; left: 0; right: 0;
+  font-size: 1.6rem; font-weight: 800; color: var(--accent2);
+}
+.scoreboard {
+  position: absolute; bottom: -64px; left: 0; right: 0;
+  display: flex; justify-content: center; gap: 16px; flex-wrap: wrap;
+}
+
+/* Balance */
+#balance-lanes { display: flex; gap: 24px; justify-content: center; align-items: flex-end; height: 60vh; }
+.lane { display: flex; flex-direction: column; align-items: center; }
+.lane canvas { background: var(--panel); border-radius: 12px; }
+.lane-name { margin-top: 8px; font-weight: 700; }
+.lane-time { opacity: 0.7; font-size: 0.9rem; }
+
+/* Controller (phone) */
+.phone-body { justify-content: flex-start; padding-top: 48px; }
+input[type=text] {
+  font-size: 1.4rem;
+  padding: 14px 18px;
+  border-radius: 12px;
+  border: 2px solid var(--accent);
+  background: var(--panel);
+  color: var(--text);
+  width: 90%;
+  max-width: 320px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+.status-pill {
+  background: var(--panel);
+  border-radius: 999px;
+  padding: 10px 24px;
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+.status-pill.you { color: var(--good); border: 2px solid var(--good); }
+.status-pill.wait { color: var(--accent); border: 2px solid var(--accent); }
+.status-pill.out { color: var(--bad); border: 2px solid var(--bad); }
+
+#tilt-indicator {
+  width: 260px; height: 260px; border-radius: 50%;
+  background: var(--panel); border: 3px solid var(--accent);
+  position: relative; margin: 24px auto;
+}
+#tilt-dot {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: var(--accent2);
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.hint { opacity: 0.6; font-size: 0.95rem; margin-top: 8px; }

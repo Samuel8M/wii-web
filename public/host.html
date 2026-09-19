@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>wii-web · Host Screen</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div id="screen-lobby" class="screen active">
+  <h1><span>wii</span>-web</h1>
+  <p class="subtitle">No console required. Grab your phone.</p>
+  <div class="code-box" id="room-code">----</div>
+  <div id="qrcode"></div>
+  <p class="hint">Scan the QR code or go to <b id="join-url"></b></p>
+  <div class="player-list" id="player-list"></div>
+  <div class="btn-row">
+    <button id="start-bowling" disabled>🎳 Start Bowling</button>
+    <button id="start-balance" disabled>🥚 Start Balance Egg</button>
+  </div>
+</div>
+
+<div id="screen-bowling" class="screen">
+  <video id="bowling-video" autoplay playsinline muted></video>
+  <div id="bowling-wrap">
+    <div class="turn-banner" id="bowling-turn">Get ready...</div>
+    <canvas id="bowling-canvas" width="960" height="600"></canvas>
+    <canvas id="bowling-overlay" width="960" height="600"></canvas>
+    <div class="scoreboard" id="bowling-scoreboard"></div>
+  </div>
+  <button class="secondary" id="bowling-back" style="margin-top:96px;">Back to Lobby</button>
+</div>
+
+<div id="screen-balance" class="screen">
+  <h1><span>Balance</span> Egg</h1>
+  <p class="subtitle" id="balance-status">Tilt your phone to keep the egg on the beam!</p>
+  <div id="balance-lanes"></div>
+  <button class="secondary" id="balance-back" style="margin-top:32px;">Back to Lobby</button>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="host.js"></script>
+</body>
+</html>

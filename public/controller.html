@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>wii-web · Controller</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div id="screen-join" class="screen phone-body active">
+  <h1><span>wii</span>-web</h1>
+  <input type="text" id="name-input" placeholder="Your name" maxlength="16" />
+  <input type="text" id="code-input" placeholder="Room code" maxlength="4" style="text-transform:uppercase;" />
+  <button id="join-btn" class="big">Join Game</button>
+  <p class="hint" id="join-error"></p>
+</div>
+
+<div id="screen-waiting" class="screen phone-body">
+  <h1>You're in!</h1>
+  <p class="subtitle">Watch the big screen — game starts soon.</p>
+  <div class="status-pill wait">Waiting for host…</div>
+</div>
+
+<div id="screen-bowling" class="screen phone-body">
+  <h1>🎳 Bowling</h1>
+  <div class="status-pill" id="bowling-turn-pill">Waiting…</div>
+  <p class="hint">Watch the big screen. When it's your turn, step up and swing your hand at the webcam like a real bowling ball!</p>
+  <div id="bowling-scores"></div>
+</div>
+
+<div id="screen-balance" class="screen phone-body">
+  <h1>🥚 Balance Egg</h1>
+  <button id="enable-tilt-btn" class="big">Start Balancing</button>
+  <div id="tilt-indicator" style="display:none;">
+    <div id="tilt-dot"></div>
+  </div>
+  <div class="status-pill you" id="balance-status-pill" style="display:none;">Balancing…</div>
+  <p class="hint" id="balance-hint">Hold your phone flat like a tray. Tilt left/right to keep the egg centered.</p>
+  <p class="hint" id="no-sensor-msg" style="display:none; color:#ff5f5f;">No motion sensor detected (testing on a laptop?) — drag left/right below instead.</p>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="controller.js"></script>
+</body>
+</html>
