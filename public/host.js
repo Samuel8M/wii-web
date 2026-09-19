@@ -110,6 +110,7 @@ const bOverlayCtx = bOverlay.getContext('2d');
 
 const SWING_TRIGGER = 0.28; // px/ms of downward wrist velocity that force-releases the ball
 const GRAB_MIN_Y = 0.5; // normalized — only grab if the hand is down around waist height or lower
+const GRAB_CONFIRM_MS = 500; // how long a fist must be held steady before the grab actually registers
 const HOLD_TIMEOUT_MS = 8000; // auto-drop if held without a throw for this long
 const LANE_HALF_WIDTH = 1.4;
 const LANE_LENGTH = 20;
@@ -124,8 +125,9 @@ const CAMERA_HOME_Z = 2.4;
 let bScene, bCamera, bRenderer, bBallMesh;
 let pins = [];
 let ball;
-let ballState = 'idle'; // idle -> held -> thrown -> (reset) idle
+let ballState = 'idle'; // idle -> grabbing -> held -> thrown -> (reset) idle
 let heldSide = null; // 'left' | 'right'
+let grabConfirmStart = 0;
 let heldSince = 0;
 let wristHistory = { left: [], right: [] };
 let cameraOk = false;
@@ -331,16 +333,40 @@ function onHolisticResults(results) {
     // eslint-disable-next-line no-undef
     drawLandmarks(bOverlayCtx, hand, { color: '#ffffff', radius: 2 });
   });
+  if (ballState === 'grabbing') {
+    const hand = heldSide === 'left' ? results.leftHandLandmarks : results.rightHandLandmarks;
+    if (hand) {
+      const progress = Math.min(1, (performance.now() - grabConfirmStart) / GRAB_CONFIRM_MS);
+      drawGrabProgressRing(hand[0].x * bOverlay.width, hand[0].y * bOverlay.height, progress);
+    }
+  }
   bOverlayCtx.restore();
 
   const now = performance.now();
   if (ballState === 'idle' && !ball.moving) {
     evaluateGrab(results);
+  } else if (ballState === 'grabbing') {
+    updateGrabbing(results, now);
   } else if (ballState === 'held') {
     updateHeldBall(results, now);
   }
 
   drawDebugHud();
+}
+
+function drawGrabProgressRing(cx, cy, progress) {
+  const r = 34;
+  bOverlayCtx.save();
+  bOverlayCtx.lineWidth = 6;
+  bOverlayCtx.strokeStyle = 'rgba(255,255,255,0.25)';
+  bOverlayCtx.beginPath();
+  bOverlayCtx.arc(cx, cy, r, 0, Math.PI * 2);
+  bOverlayCtx.stroke();
+  bOverlayCtx.strokeStyle = '#4fff8f';
+  bOverlayCtx.beginPath();
+  bOverlayCtx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+  bOverlayCtx.stroke();
+  bOverlayCtx.restore();
 }
 
 function evaluateGrab(results) {
@@ -349,9 +375,9 @@ function evaluateGrab(results) {
     if (!hand) continue;
     if (hand[0].y < GRAB_MIN_Y) continue; // hand held up high — not reaching for the ball
     if (isHandClosed(hand) === true) {
-      ballState = 'held';
+      ballState = 'grabbing';
       heldSide = side;
-      heldSince = performance.now();
+      grabConfirmStart = performance.now();
       wristHistory.left = [];
       wristHistory.right = [];
       return;
@@ -359,24 +385,52 @@ function evaluateGrab(results) {
   }
 }
 
-function updateHeldBall(results, now) {
+// Ball visually tracks the holding hand during both the "grabbing"
+// confirmation window and once fully "held", so it feels responsive
+// immediately even before the grasp is confirmed.
+function followHandWithBall(results, now) {
   const hand = heldSide === 'left' ? results.leftHandLandmarks : results.rightHandLandmarks;
   const poseWrist = results.poseLandmarks ? results.poseLandmarks[heldSide === 'left' ? 15 : 16] : null;
   // The coarse body wrist tracks more reliably than fine finger landmarks
   // during a fast swing (motion blur), so prefer it for position/velocity.
   const wristLm = poseWrist || (hand ? hand[0] : null);
+  if (!wristLm) return;
 
-  if (wristLm) {
-    const px = wristLm.x * bOverlay.width;
-    const py = wristLm.y * bOverlay.height;
-    const hist = wristHistory[heldSide];
-    hist.push({ x: px, y: py, t: now });
-    if (hist.length > 4) hist.shift();
+  const px = wristLm.x * bOverlay.width;
+  const py = wristLm.y * bOverlay.height;
+  const hist = wristHistory[heldSide];
+  hist.push({ x: px, y: py, t: now });
+  if (hist.length > 4) hist.shift();
 
-    // Ball visually follows the holding hand while it's held.
-    ball.x = mapRange(wristLm.x, 0.2, 0.8, LANE_HALF_WIDTH - BALL_RADIUS, -(LANE_HALF_WIDTH - BALL_RADIUS));
-    bBallMesh.position.set(ball.x, BALL_RADIUS, 0);
+  ball.x = mapRange(wristLm.x, 0.2, 0.8, LANE_HALF_WIDTH - BALL_RADIUS, -(LANE_HALF_WIDTH - BALL_RADIUS));
+  bBallMesh.position.set(ball.x, BALL_RADIUS, 0);
+}
+
+function updateGrabbing(results, now) {
+  const hand = heldSide === 'left' ? results.leftHandLandmarks : results.rightHandLandmarks;
+  followHandWithBall(results, now);
+
+  if (isHandClosed(hand) === false) {
+    // Let go before the grasp was confirmed — it was never actually picked up.
+    ballState = 'idle';
+    heldSide = null;
+    resetBall3D();
+    return;
   }
+
+  if (now - grabConfirmStart >= GRAB_CONFIRM_MS) {
+    ballState = 'held';
+    heldSince = now;
+    // Fresh velocity history from this exact moment, so residual motion
+    // from the reach-and-grab itself can't read as an instant release.
+    wristHistory.left = [];
+    wristHistory.right = [];
+  }
+}
+
+function updateHeldBall(results, now) {
+  const hand = heldSide === 'left' ? results.leftHandLandmarks : results.rightHandLandmarks;
+  followHandWithBall(results, now);
 
   const hist = wristHistory[heldSide];
   let vx = 0, vy = 0;
@@ -480,6 +534,10 @@ function updateCameraDolly() {
 
 function ballStateLabel() {
   if (ballState === 'idle') return 'make a fist below your waist to GRAB the ball';
+  if (ballState === 'grabbing') {
+    const remaining = Math.max(0, (GRAB_CONFIRM_MS - (performance.now() - grabConfirmStart)) / 1000);
+    return `grabbing (${heldSide} hand)... hold still ${remaining.toFixed(1)}s`;
+  }
   if (ballState === 'held') return `HELD (${heldSide} hand) — swing & open your hand to RELEASE`;
   return 'rolling...';
 }
