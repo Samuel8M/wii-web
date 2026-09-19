@@ -24,25 +24,32 @@
   <video id="bowling-video" autoplay playsinline muted></video>
   <div id="bowling-wrap">
     <div class="turn-banner" id="bowling-turn">Get ready...</div>
-    <canvas id="bowling-canvas" width="960" height="600"></canvas>
-    <canvas id="bowling-overlay" width="960" height="600"></canvas>
+    <canvas id="bowling-3d"></canvas>
+    <canvas id="bowling-overlay"></canvas>
     <div class="scoreboard" id="bowling-scoreboard"></div>
   </div>
   <button class="secondary" id="bowling-back" style="margin-top:96px;">Back to Lobby</button>
 </div>
 
 <div id="screen-balance" class="screen">
+  <video id="balance-video" autoplay playsinline muted></video>
   <h1><span>Balance</span> Egg</h1>
-  <p class="subtitle" id="balance-status">Tilt your phone to keep the egg on the beam!</p>
-  <div id="balance-lanes"></div>
-  <button class="secondary" id="balance-back" style="margin-top:32px;">Back to Lobby</button>
+  <p class="subtitle" id="balance-status">Stand in front of the camera, left to right, and lean to balance your egg!</p>
+  <div id="balance-wrap">
+    <canvas id="balance-3d"></canvas>
+    <canvas id="balance-overlay"></canvas>
+  </div>
+  <button class="secondary" id="balance-back" style="margin-top:24px;">Back to Lobby</button>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js" crossorigin="anonymous"></script>
 <script src="host.js"></script>
 </body>
 </html>

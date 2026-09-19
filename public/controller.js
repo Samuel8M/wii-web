@@ -37,35 +37,18 @@ document.getElementById('join-btn').onclick = () => {
   });
 };
 
-socket.on('lobby:update', () => {
-  if (screens.waiting.classList.contains('active')) {
-    // still waiting, nothing else to do
-  }
-});
-
-socket.on('game:start', ({ game }) => {
-  stopTiltStream();
-  if (game === 'bowling') showScreen('bowling');
-  if (game === 'balance') { showScreen('balance'); resetBalanceUI(); }
-});
-
-function stopTiltStream() {
-  if (tiltHandler) { window.removeEventListener('deviceorientation', tiltHandler); tiltHandler = null; }
-  if (tiltInterval) { clearInterval(tiltInterval); tiltInterval = null; }
-  if (sensorCheckTimeout) { clearTimeout(sensorCheckTimeout); sensorCheckTimeout = null; }
-}
-
 socket.on('host:disconnected', () => {
   alert('The host screen disconnected. Rejoin once it restarts.');
   showScreen('join');
 });
 
-/* Bowling controller: just shows whose turn it is + live scores. */
+/* Bowling controller: just shows whose turn it is + live scores.
+   Gameplay itself is full-body, tracked by the host's webcam. */
 socket.on('bowling:update', ({ players, turnIndex }) => {
   const pill = document.getElementById('bowling-turn-pill');
   const current = players[turnIndex % players.length];
   if (current && current.id === myId) {
-    pill.textContent = "🎳 YOUR TURN — swing at the camera!";
+    pill.textContent = "🎳 YOUR TURN — step up and swing!";
     pill.className = 'status-pill you';
     if (navigator.vibrate) navigator.vibrate(200);
   } else {
@@ -86,98 +69,25 @@ socket.on('bowling:update', ({ players, turnIndex }) => {
     });
 });
 
-/* Balance controller: stream device tilt at ~20Hz, with a manual drag
-   fallback for devices/browsers with no usable orientation sensor
-   (most laptops, and some desktop browsers that fire the event with
-   beta/gamma stuck at null). */
-let tiltHandler = null;
-let tiltInterval = null;
-let sensorCheckTimeout = null;
-let latestTilt = { beta: 0, gamma: 0 };
+/* Balance-egg controller: no phone input at all — the host's webcam tracks
+   everyone's body lean simultaneously. The phone just tells you which lane
+   (left-to-right standing position) you are and shows live status. */
 let eliminated = false;
-let realSensorSeen = false;
-let manualMode = false;
-let manualGamma = 0;
 
-function resetBalanceUI() {
-  eliminated = false;
-  realSensorSeen = false;
-  manualMode = false;
-  manualGamma = 0;
-  document.getElementById('enable-tilt-btn').style.display = 'inline-block';
-  document.getElementById('tilt-indicator').style.display = 'none';
-  document.getElementById('balance-status-pill').style.display = 'none';
-  document.getElementById('no-sensor-msg').style.display = 'none';
-  document.getElementById('balance-hint').style.display = 'block';
-}
-
-document.getElementById('enable-tilt-btn').onclick = async () => {
-  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-    try {
-      const perm = await DeviceOrientationEvent.requestPermission();
-      if (perm !== 'granted') {
-        alert("Motion permission denied — falling back to manual drag control.");
-      }
-    } catch (e) {
-      console.warn('Motion permission request failed, falling back to manual drag:', e);
-    }
+socket.on('game:start', ({ game, players }) => {
+  if (game === 'bowling') showScreen('bowling');
+  if (game === 'balance') {
+    showScreen('balance');
+    eliminated = false;
+    const laneIndex = players.findIndex((p) => p.id === myId);
+    document.getElementById('balance-lane-pill').textContent =
+      laneIndex >= 0 ? `You're Lane ${laneIndex + 1}` : 'You';
+    const statusPill = document.getElementById('balance-status-pill');
+    statusPill.style.display = 'inline-block';
+    statusPill.textContent = 'Balancing…';
+    statusPill.className = 'status-pill you';
   }
-  startTiltStream();
-};
-
-function startTiltStream() {
-  document.getElementById('enable-tilt-btn').style.display = 'none';
-  document.getElementById('tilt-indicator').style.display = 'block';
-  const pill = document.getElementById('balance-status-pill');
-  pill.style.display = 'inline-block';
-  pill.textContent = 'Balancing…';
-  pill.className = 'status-pill you';
-
-  const dot = document.getElementById('tilt-dot');
-  const indicator = document.getElementById('tilt-indicator');
-
-  tiltHandler = (e) => {
-    if (e.gamma === null || e.gamma === undefined) return; // no real sensor data
-    realSensorSeen = true;
-    if (manualMode) return; // user already took over manually, don't fight them
-    latestTilt = { beta: e.beta || 0, gamma: e.gamma || 0 };
-    const clampedGamma = Math.max(-45, Math.min(45, latestTilt.gamma));
-    dot.style.transform = `translate(calc(-50% + ${clampedGamma * 2}px), -50%)`;
-  };
-  window.addEventListener('deviceorientation', tiltHandler);
-
-  // If no real orientation data shows up shortly, switch to drag-to-tilt.
-  sensorCheckTimeout = setTimeout(() => {
-    if (!realSensorSeen) enableManualFallback();
-  }, 1200);
-
-  function enableManualFallback() {
-    manualMode = true;
-    document.getElementById('no-sensor-msg').style.display = 'block';
-    document.getElementById('balance-hint').style.display = 'none';
-
-    const setFromClientX = (clientX) => {
-      const rect = indicator.getBoundingClientRect();
-      const offset = clientX - (rect.left + rect.width / 2);
-      manualGamma = Math.max(-45, Math.min(45, (offset / (rect.width / 2)) * 45));
-      latestTilt = { beta: 0, gamma: manualGamma };
-      dot.style.transform = `translate(calc(-50% + ${manualGamma * 2}px), -50%)`;
-    };
-
-    let dragging = false;
-    indicator.style.cursor = 'grab';
-    indicator.addEventListener('pointerdown', (e) => { dragging = true; indicator.setPointerCapture(e.pointerId); setFromClientX(e.clientX); });
-    indicator.addEventListener('pointermove', (e) => { if (dragging) setFromClientX(e.clientX); });
-    const stop = () => { dragging = false; };
-    indicator.addEventListener('pointerup', stop);
-    indicator.addEventListener('pointercancel', stop);
-  }
-
-  tiltInterval = setInterval(() => {
-    if (eliminated) return;
-    socket.emit('tilt:update', latestTilt);
-  }, 50);
-}
+});
 
 socket.on('balance:update', ({ players }) => {
   const me = players.find((p) => p.id === myId);

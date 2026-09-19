@@ -86,9 +86,9 @@ button.big { font-size: 1.8rem; padding: 28px 48px; width: 100%; }
 /* Bowling */
 #screen-bowling { position: relative; }
 #bowling-video { display: none; }
-#bowling-wrap { position: relative; width: min(90vw, 1000px); }
-#bowling-canvas, #bowling-overlay {
-  position: absolute; top: 0; left: 0; width: 100%; border-radius: 16px;
+#bowling-wrap { position: relative; width: min(90vw, 1100px); aspect-ratio: 16 / 9; }
+#bowling-3d, #bowling-overlay {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%; border-radius: 16px;
 }
 #bowling-overlay { pointer-events: none; }
 .turn-banner {
@@ -100,12 +100,14 @@ button.big { font-size: 1.8rem; padding: 28px 48px; width: 100%; }
   display: flex; justify-content: center; gap: 16px; flex-wrap: wrap;
 }
 
-/* Balance */
-#balance-lanes { display: flex; gap: 24px; justify-content: center; align-items: flex-end; height: 60vh; }
-.lane { display: flex; flex-direction: column; align-items: center; }
-.lane canvas { background: var(--panel); border-radius: 12px; }
-.lane-name { margin-top: 8px; font-weight: 700; }
-.lane-time { opacity: 0.7; font-size: 0.9rem; }
+/* Balance (human balancing, tracked via webcam) */
+#screen-balance { position: relative; }
+#balance-video { display: none; }
+#balance-wrap { position: relative; width: min(90vw, 1100px); aspect-ratio: 16 / 9; }
+#balance-3d, #balance-overlay {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%; border-radius: 16px;
+}
+#balance-overlay { pointer-events: none; }
 
 /* Controller (phone) */
 .phone-body { justify-content: flex-start; padding-top: 48px; }
@@ -131,17 +133,5 @@ input[type=text] {
 .status-pill.you { color: var(--good); border: 2px solid var(--good); }
 .status-pill.wait { color: var(--accent); border: 2px solid var(--accent); }
 .status-pill.out { color: var(--bad); border: 2px solid var(--bad); }
-
-#tilt-indicator {
-  width: 260px; height: 260px; border-radius: 50%;
-  background: var(--panel); border: 3px solid var(--accent);
-  position: relative; margin: 24px auto;
-}
-#tilt-dot {
-  width: 36px; height: 36px; border-radius: 50%;
-  background: var(--accent2);
-  position: absolute; top: 50%; left: 50%;
-  transform: translate(-50%, -50%);
-}
 
 .hint { opacity: 0.6; font-size: 0.95rem; margin-top: 8px; }

@@ -74,80 +74,181 @@ document.getElementById('balance-back').onclick = () => {
 
 socket.on('game:start', ({ game, players: p }) => {
   players = p;
-  if (game === 'bowling') { showScreen('bowling'); startBowling(); }
-  if (game === 'balance') { showScreen('balance'); startBalance(); }
+  if (game === 'bowling') { showScreen('bowling'); resizeBowlingCanvas(); startBowling(); }
+  if (game === 'balance') { showScreen('balance'); resizeBalanceCanvas(); startBalance(); }
 });
 
+window.addEventListener('resize', () => {
+  if (bowlingActive) resizeBowlingCanvas();
+  if (balanceActive) resizeBalanceCanvas();
+});
+
+function mapRange(v, inMin, inMax, outMin, outMax) {
+  const t = Math.max(0, Math.min(1, (v - inMin) / (inMax - inMin)));
+  return outMin + t * (outMax - outMin);
+}
+
 /* =========================================================
-   BOWLING — MediaPipe Hands tracks a "swing" gesture from the
-   webcam; a simple physics sim rolls a ball at 10 pins.
+   BOWLING — full-body pose tracking (MediaPipe Pose) reads a real
+   arm-swing motion from the webcam; a 3D scene (Three.js) rolls the
+   ball down a lane at 10 pins, camera gliding along behind it.
    ========================================================= */
-let bowlingHands = null;
+let bowlingPose = null;
 let bowlingCamera = null;
 let bowlingRAF = null;
 let bowlingActive = false;
+let bLastTime = null;
 
-const bCanvas = document.getElementById('bowling-canvas');
-const bCtx = bCanvas.getContext('2d');
+const bVideo = document.getElementById('bowling-video');
+const b3dCanvas = document.getElementById('bowling-3d');
 const bOverlay = document.getElementById('bowling-overlay');
 const bOverlayCtx = bOverlay.getContext('2d');
-const bVideo = document.getElementById('bowling-video');
 
-const LANE = { w: 960, h: 600, ballR: 18, pinR: 12 };
-const SWING_TRIGGER = 0.28; // px/ms of downward palm velocity needed to launch
-let ball, pins, ballMoving, swingState, handHistory;
+const SWING_TRIGGER = 0.28; // px/ms of downward wrist velocity needed to launch
+const LANE_HALF_WIDTH = 1.4;
+const LANE_LENGTH = 20;
+const PIN_APEX_Z = -15;
+const PIN_ROW_SPACING = 0.62;
+const PIN_LATERAL_SPACING = 0.58;
+const BALL_RADIUS = 0.13;
+const PIN_RADIUS = 0.11;
+const PIN_FALL_DURATION = 0.7; // seconds
+const CAMERA_HOME_Z = 2.4;
+
+let bScene, bCamera, bRenderer, bBallMesh;
+let pins = [];
+let ball;
+let swingState = 'idle'; // idle -> cooldown
+let wristHistory = { left: [], right: [] };
 let cameraOk = false;
 let cameraError = null;
-let handDetected = false;
+let poseDetected = false;
 let lastSwingSpeed = 0;
 
-function resetPins() {
+function ensureBowlingScene() {
+  if (bScene) return;
+  bRenderer = new THREE.WebGLRenderer({ canvas: b3dCanvas, antialias: true });
+  bRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+  bScene = new THREE.Scene();
+  bScene.background = new THREE.Color(0x0b0e1a);
+  bScene.fog = new THREE.Fog(0x0b0e1a, 8, 22);
+
+  bCamera = new THREE.PerspectiveCamera(55, 16 / 9, 0.1, 100);
+  bCamera.position.set(0, 1.1, CAMERA_HOME_Z);
+  bCamera.lookAt(0, 0.3, -10);
+
+  const hemi = new THREE.HemisphereLight(0xbfe3ff, 0x3a2a1a, 0.9);
+  bScene.add(hemi);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir.position.set(3, 6, 2);
+  bScene.add(dir);
+
+  const laneGeo = new THREE.BoxGeometry(LANE_HALF_WIDTH * 2, 0.08, LANE_LENGTH);
+  const laneMat = new THREE.MeshStandardMaterial({ color: 0x8a5a2b, roughness: 0.6 });
+  const lane = new THREE.Mesh(laneGeo, laneMat);
+  lane.position.set(0, -0.08, -LANE_LENGTH / 2 + 1);
+  bScene.add(lane);
+
+  const gutterGeo = new THREE.BoxGeometry(0.18, 0.1, LANE_LENGTH);
+  const gutterMat = new THREE.MeshStandardMaterial({ color: 0x1c2438 });
+  [-1, 1].forEach((side) => {
+    const g = new THREE.Mesh(gutterGeo, gutterMat);
+    g.position.set(side * (LANE_HALF_WIDTH + 0.13), -0.06, -LANE_LENGTH / 2 + 1);
+    bScene.add(g);
+  });
+
+  const backdropGeo = new THREE.PlaneGeometry(10, 5);
+  const backdropMat = new THREE.MeshStandardMaterial({ color: 0x141a2e });
+  const backdrop = new THREE.Mesh(backdropGeo, backdropMat);
+  backdrop.position.set(0, 2, -LANE_LENGTH + 1);
+  bScene.add(backdrop);
+
+  const ballGeo = new THREE.SphereGeometry(BALL_RADIUS, 20, 20);
+  const ballMat = new THREE.MeshStandardMaterial({ color: 0x4fd1ff, roughness: 0.3, metalness: 0.2 });
+  bBallMesh = new THREE.Mesh(ballGeo, ballMat);
+  bScene.add(bBallMesh);
+
+  const pinGeo = new THREE.CylinderGeometry(0.045, PIN_RADIUS, 0.38, 10);
+  pinGeo.translate(0, 0.19, 0);
   pins = [];
-  const rows = [4, 3, 2, 1];
-  let y = 90;
+  const rows = [1, 2, 3, 4];
+  let z = PIN_APEX_Z;
   rows.forEach((count) => {
-    const rowWidth = (count - 1) * 40;
+    const rowWidth = (count - 1) * PIN_LATERAL_SPACING;
     for (let i = 0; i < count; i++) {
-      pins.push({
-        x: LANE.w / 2 - rowWidth / 2 + i * 40,
-        y,
-        knocked: false,
-        origX: LANE.w / 2 - rowWidth / 2 + i * 40,
-      });
+      const x = -rowWidth / 2 + i * PIN_LATERAL_SPACING;
+      const mat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+      const mesh = new THREE.Mesh(pinGeo, mat);
+      mesh.position.set(x, 0, z);
+      bScene.add(mesh);
+      pins.push({ x, z, baseX: x, baseZ: z, knocked: false, fallProgress: 1, mesh });
     }
-    y += 38;
+    z -= PIN_ROW_SPACING;
+  });
+
+  ball = { x: 0, z: 0, vx: 0, vz: 0, curveAccel: 0, moving: false };
+}
+
+function resizeBowlingCanvas() {
+  const wrap = document.getElementById('bowling-wrap');
+  const w = Math.max(wrap.clientWidth, 2);
+  const h = Math.max(wrap.clientHeight, 2);
+  bOverlay.width = w;
+  bOverlay.height = h;
+  if (bRenderer) {
+    bRenderer.setSize(w, h, false);
+    bCamera.aspect = w / h;
+    bCamera.updateProjectionMatrix();
+  }
+}
+
+function resetPins3D() {
+  pins.forEach((p) => {
+    p.knocked = false;
+    p.fallProgress = 1;
+    p.x = p.baseX;
+    p.z = p.baseZ;
+    p.mesh.position.set(p.baseX, 0, p.baseZ);
+    p.mesh.rotation.set(0, 0, 0);
+    p.mesh.visible = true;
   });
 }
-function resetBall() {
-  ball = { x: LANE.w / 2, y: LANE.h - 60, vx: 0, vy: 0, moving: false };
+function resetBall3D() {
+  ball.x = 0; ball.z = 0; ball.vx = 0; ball.vz = 0; ball.curveAccel = 0; ball.moving = false;
+  bBallMesh.position.set(0, BALL_RADIUS, 0);
+  bBallMesh.rotation.set(0, 0, 0);
 }
 
 function startBowling() {
   bowlingActive = true;
-  resetPins();
-  resetBall();
-  swingState = 'idle'; // idle -> ready -> cooldown
-  handHistory = [];
+  swingState = 'idle';
+  wristHistory = { left: [], right: [] };
+  bLastTime = null;
+  ensureBowlingScene();
+  resizeBowlingCanvas();
+  resetPins3D();
+  resetBall3D();
   updateTurnBanner();
   renderScoreboard();
 
   // eslint-disable-next-line no-undef
-  bowlingHands = new Hands({
-    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+  bowlingPose = new Pose({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
   });
-  bowlingHands.setOptions({
-    maxNumHands: 1,
+  bowlingPose.setOptions({
     modelComplexity: 0,
+    smoothLandmarks: true,
     minDetectionConfidence: 0.6,
     minTrackingConfidence: 0.5,
   });
-  bowlingHands.onResults(onHandResults);
+  bowlingPose.onResults(onPoseResults);
 
   // eslint-disable-next-line no-undef
   bowlingCamera = new Camera(bVideo, {
     onFrame: async () => {
       cameraOk = true;
-      await bowlingHands.send({ image: bVideo });
+      await bowlingPose.send({ image: bVideo });
     },
     width: 640,
     height: 480,
@@ -165,67 +266,143 @@ function stopBowling() {
   bowlingActive = false;
   if (bowlingCamera) { bowlingCamera.stop(); bowlingCamera = null; }
   if (bowlingRAF) { cancelAnimationFrame(bowlingRAF); bowlingRAF = null; }
-  bowlingHands = null;
+  bowlingPose = null;
 }
 
-function onHandResults(results) {
+function onPoseResults(results) {
   bOverlayCtx.save();
   bOverlayCtx.clearRect(0, 0, bOverlay.width, bOverlay.height);
   bOverlayCtx.translate(bOverlay.width, 0);
   bOverlayCtx.scale(-1, 1); // mirror so it feels natural
 
-  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-    handDetected = true;
-    const lm = results.multiHandLandmarks[0];
+  if (results.poseLandmarks) {
+    poseDetected = true;
+    const lm = results.poseLandmarks;
     // eslint-disable-next-line no-undef
-    drawConnectors(bOverlayCtx, lm, HAND_CONNECTIONS, { color: '#4fd1ff', lineWidth: 4 });
+    drawConnectors(bOverlayCtx, lm, POSE_CONNECTIONS, { color: '#4fd1ff', lineWidth: 3 });
     // eslint-disable-next-line no-undef
-    drawLandmarks(bOverlayCtx, lm, { color: '#ff5fa2', radius: 5 });
+    drawLandmarks(bOverlayCtx, lm, { color: '#ff5fa2', radius: 3 });
 
-    const palm = lm[9]; // middle finger MCP ~ palm center
-    const px = palm.x * bOverlay.width;
-    const py = palm.y * bOverlay.height;
     const now = performance.now();
-    handHistory.push({ x: px, y: py, t: now });
-    if (handHistory.length > 4) handHistory.shift();
-
+    pushWrist('left', lm[15], now);
+    pushWrist('right', lm[16], now);
     evaluateSwing();
   } else {
-    handDetected = false;
-    handHistory = [];
+    poseDetected = false;
+    wristHistory.left = [];
+    wristHistory.right = [];
   }
   bOverlayCtx.restore();
   drawDebugHud();
 }
 
-function evaluateSwing() {
-  if (!bowlingActive || ballMoving || swingState === 'cooldown') return;
-  if (handHistory.length < 2) return;
-  // Frame-to-frame velocity is far more responsive to a real swing than a
-  // windowed average, which gets swamped by tracking jitter when the hand
-  // is held roughly still.
-  const prev = handHistory[handHistory.length - 2];
-  const cur = handHistory[handHistory.length - 1];
-  const dt = cur.t - prev.t;
-  if (dt <= 0) return;
-  const vy = (cur.y - prev.y) / dt; // px/ms, positive = moving down (post-mirror)
-  const vx = (cur.x - prev.x) / dt;
-  lastSwingSpeed = vy;
+function pushWrist(side, lm, now) {
+  if (!lm || (lm.visibility !== undefined && lm.visibility < 0.4)) return;
+  const px = lm.x * bOverlay.width;
+  const py = lm.y * bOverlay.height;
+  const hist = wristHistory[side];
+  hist.push({ x: px, y: py, t: now });
+  if (hist.length > 4) hist.shift();
+}
 
-  if (vy > SWING_TRIGGER) {
-    launchBall(vx, vy);
+function evaluateSwing() {
+  if (!bowlingActive || ball.moving || swingState === 'cooldown') return;
+  const candidates = [];
+  ['left', 'right'].forEach((side) => {
+    const hist = wristHistory[side];
+    if (hist.length < 2) return;
+    const prev = hist[hist.length - 2];
+    const cur = hist[hist.length - 1];
+    const dt = cur.t - prev.t;
+    if (dt <= 0) return;
+    candidates.push({ vx: (cur.x - prev.x) / dt, vy: (cur.y - prev.y) / dt });
+  });
+  if (!candidates.length) return;
+  const best = candidates.reduce((a, b) => (b.vy > a.vy ? b : a));
+  lastSwingSpeed = best.vy;
+
+  if (best.vy > SWING_TRIGGER) {
+    launchBall(best.vx, best.vy);
     swingState = 'cooldown';
     setTimeout(() => { swingState = 'idle'; }, 1200);
   }
 }
 
 function launchBall(vx, vy) {
-  const power = Math.min(Math.max(vy * 24, 9), 24);
-  const curve = Math.max(Math.min(vx * 14, 8), -8);
-  ball.vx = curve;
-  ball.vy = -power;
+  ball.vz = mapRange(vy, SWING_TRIGGER, 1.0, 8, 16);
+  ball.curveAccel = mapRange(Math.abs(vx), 0, 0.6, 0, 3) * Math.sign(vx);
+  ball.vx = 0;
   ball.moving = true;
-  ballMoving = true;
+}
+
+function knockPin(p, nx, nz) {
+  if (p.knocked) return;
+  p.knocked = true;
+  p.fallProgress = 0;
+  p.fallDirX = nx;
+  p.fallDirZ = nz;
+  pins.forEach((other) => {
+    if (other === p || other.knocked) return;
+    const dist = Math.hypot(other.x - p.x, other.z - p.z);
+    if (dist < PIN_RADIUS * 2.6) {
+      knockPin(other, (other.x - p.x) / (dist || 1), (other.z - p.z) / (dist || 1));
+    }
+  });
+}
+
+function updateFallingPins(dt) {
+  pins.forEach((p) => {
+    if (!p.knocked || p.fallProgress >= 1) return;
+    p.fallProgress = Math.min(1, p.fallProgress + dt / PIN_FALL_DURATION);
+    const axis = new THREE.Vector3(-(p.fallDirZ || 0), 0, p.fallDirX || 1).normalize();
+    p.mesh.setRotationFromAxisAngle(axis, p.fallProgress * 1.4);
+    p.mesh.position.y = -p.fallProgress * 0.08;
+    if (p.fallProgress >= 1) p.mesh.visible = false;
+  });
+}
+
+function step3D(dt) {
+  if (!ball.moving) { updateFallingPins(dt); return; }
+  ball.vx += (ball.curveAccel || 0) * dt;
+  ball.z -= ball.vz * dt;
+  ball.x += ball.vx * dt;
+  ball.vz -= ball.vz * 0.15 * dt;
+
+  bBallMesh.position.set(ball.x, BALL_RADIUS, ball.z);
+  bBallMesh.rotation.x -= (ball.vz * dt) / BALL_RADIUS;
+
+  if (Math.abs(ball.x) > LANE_HALF_WIDTH - BALL_RADIUS) { finishRoll(true); return; }
+
+  pins.forEach((p) => {
+    if (p.knocked) return;
+    const dist = Math.hypot(ball.x - p.x, ball.z - p.z);
+    if (dist < BALL_RADIUS + PIN_RADIUS) {
+      knockPin(p, (p.x - ball.x) / (dist || 1), (p.z - ball.z) / (dist || 1));
+    }
+  });
+  updateFallingPins(dt);
+
+  if (ball.z < PIN_APEX_Z - 2.5 || ball.vz < 0.4) finishRoll(false);
+}
+
+function finishRoll(gutter) {
+  ball.moving = false;
+  const pinsKnocked = gutter ? 0 : pins.filter((p) => p.knocked).length;
+  socket.emit('bowling:frameResult', { pinsKnocked, gutter });
+  setTimeout(() => {
+    resetPins3D();
+    resetBall3D();
+    swingState = 'idle';
+    wristHistory.left = [];
+    wristHistory.right = [];
+  }, 1600);
+}
+
+function updateCameraDolly() {
+  const targetZ = ball.moving ? Math.max(ball.z + 2.2, -12) : CAMERA_HOME_Z;
+  bCamera.position.z += (targetZ - bCamera.position.z) * 0.04;
+  const lookZ = ball.moving ? ball.z - 3 : -10;
+  bCamera.lookAt(0, 0.3, lookZ);
 }
 
 function drawDebugHud() {
@@ -235,7 +412,7 @@ function drawDebugHud() {
   ctx.textAlign = 'left';
   const lines = [
     cameraOk ? 'camera: ok' : `camera: ${cameraError ? 'ERROR - ' + cameraError : 'starting...'}`,
-    `hand: ${handDetected ? 'detected' : 'not detected - step into frame'}`,
+    `pose: ${poseDetected ? 'detected' : 'not detected - step into frame'}`,
     `swing speed: ${lastSwingSpeed.toFixed(2)} (trigger @ ${SWING_TRIGGER})`,
   ];
   lines.forEach((line, i) => {
@@ -248,75 +425,21 @@ function drawDebugHud() {
   ctx.restore();
 }
 
-function bowlingLoop() {
+function bowlingLoop(now) {
   if (!bowlingActive) return;
-  step();
-  draw();
-  if (!handDetected) drawDebugHud(); // keep status visible even if MediaPipe never calls back
+  const dt = bLastTime ? Math.min((now - bLastTime) / 1000, 0.05) : 0.016;
+  bLastTime = now;
+  step3D(dt);
+  updateCameraDolly();
+  bRenderer.render(bScene, bCamera);
+  if (!poseDetected) drawDebugHud(); // keep status visible even if MediaPipe never calls back
   bowlingRAF = requestAnimationFrame(bowlingLoop);
-}
-
-function step() {
-  if (!ball.moving) return;
-  ball.x += ball.vx;
-  ball.y += ball.vy;
-  if (ball.x < LANE.ballR || ball.x > LANE.w - LANE.ballR) {
-    finishRoll(true);
-    return;
-  }
-  for (const pin of pins) {
-    if (pin.knocked) continue;
-    const d = Math.hypot(ball.x - pin.x, ball.y - pin.y);
-    if (d < LANE.ballR + LANE.pinR) {
-      pin.knocked = true;
-      pin.x += ball.vx * 3;
-      pin.y += ball.vy * 0.5;
-    }
-  }
-  if (ball.y < 40) finishRoll(false);
-}
-
-function finishRoll(gutter) {
-  ball.moving = false;
-  ballMoving = false;
-  const pinsKnocked = gutter ? 0 : pins.filter((p) => p.knocked).length;
-  socket.emit('bowling:frameResult', { pinsKnocked, gutter });
-  setTimeout(() => {
-    resetPins();
-    resetBall();
-    swingState = 'idle';
-    handHistory = [];
-  }, 1400);
-}
-
-function draw() {
-  bCtx.clearRect(0, 0, LANE.w, LANE.h);
-  bCtx.fillStyle = '#3a2a1a';
-  bCtx.fillRect(0, 0, LANE.w, LANE.h);
-  bCtx.fillStyle = '#5c4327';
-  bCtx.fillRect(60, 20, LANE.w - 120, LANE.h - 40);
-  // pins
-  pins.forEach((p) => {
-    if (p.knocked) return;
-    bCtx.beginPath();
-    bCtx.arc(p.x, p.y, LANE.pinR, 0, Math.PI * 2);
-    bCtx.fillStyle = '#fff';
-    bCtx.fill();
-    bCtx.strokeStyle = '#ff5fa2';
-    bCtx.lineWidth = 2;
-    bCtx.stroke();
-  });
-  // ball
-  bCtx.beginPath();
-  bCtx.arc(ball.x, ball.y, LANE.ballR, 0, Math.PI * 2);
-  bCtx.fillStyle = '#4fd1ff';
-  bCtx.fill();
 }
 
 function updateTurnBanner() {
   const el = document.getElementById('bowling-turn');
   if (!players.length) { el.textContent = 'Waiting for players…'; return; }
-  el.textContent = `${players[0].name}'s turn — swing your hand!`;
+  el.textContent = `${players[0].name}'s turn — step up and swing!`;
 }
 function renderScoreboard() {
   const el = document.getElementById('bowling-scoreboard');
@@ -334,143 +457,297 @@ socket.on('bowling:update', ({ players: p, turnIndex }) => {
   renderScoreboard();
   const el = document.getElementById('bowling-turn');
   if (players.length) {
-    el.textContent = `${players[turnIndex % players.length].name}'s turn — swing your hand!`;
+    el.textContent = `${players[turnIndex % players.length].name}'s turn — step up and swing!`;
   }
 });
 
 /* =========================================================
-   BALANCE EGG — one lane per phone, tilt (gamma) sets beam
-   angle, egg slides via simple physics, falls off = eliminated.
+   BALANCE EGG — fully human-powered. Everyone stands in front of
+   the same webcam at once; TensorFlow.js MoveNet MultiPose tracks
+   each person's body independently and their torso lean (shoulders
+   relative to hips) drives their own egg on a shared beam overlay.
    ========================================================= */
 let balanceActive = false;
 let balanceRAF = null;
-let balancePlayers = new Map(); // id -> { name, angle, pos, vel, alive, startTime, canvas, ctx }
+let balanceLastTime = null;
+let balanceDetector = null;
+let balanceBusy = false;
+let balanceCameraOk = false;
+let balanceCameraError = null;
+let posesDetectedCount = 0;
+let balanceLanes = []; // [{ id, name, angle, targetAngle, pos, vel, alive, startTime, screenX }]
+let balanceEnded = false;
 
-const LANE_W = 160, LANE_H = 420, BEAM_LEN = 130;
-// Beginner-friendly physics: gentle pull, strong damping, small tilts ignored,
-// input smoothed so phone jitter doesn't snap the beam around, and a bit of
-// extra room past the ends of the beam before the egg actually falls.
-const GRAVITY = 0.00035;
-const FRICTION = 0.93;
-const TILT_DEADZONE = 5; // degrees of tilt that count as "flat"
-const TILT_MAX = 30; // degrees for full effect (was effectively 45)
-const TILT_SMOOTHING = 0.12; // 0..1, lower = lazier/more forgiving response
-const FALL_THRESHOLD = 1.2; // was 1 — egg can overhang the beam a bit before it's "off"
+const balanceVideo = document.getElementById('balance-video');
+const bal3dCanvas = document.getElementById('balance-3d');
+const bal3dCtx = bal3dCanvas.getContext('2d');
+const balOverlay = document.getElementById('balance-overlay');
+const balOverlayCtx = balOverlay.getContext('2d');
 
-function startBalance() {
-  balanceActive = true;
-  balancePlayers = new Map();
-  const container = document.getElementById('balance-lanes');
-  container.innerHTML = '';
-  players.forEach((p) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'lane';
-    const canvas = document.createElement('canvas');
-    canvas.width = LANE_W; canvas.height = LANE_H;
-    wrap.appendChild(canvas);
-    const nameEl = document.createElement('div');
-    nameEl.className = 'lane-name'; nameEl.textContent = p.name;
-    wrap.appendChild(nameEl);
-    const timeEl = document.createElement('div');
-    timeEl.className = 'lane-time'; timeEl.textContent = '0.0s';
-    wrap.appendChild(timeEl);
-    container.appendChild(wrap);
-    balancePlayers.set(p.id, {
-      name: p.name, angle: 0, targetAngle: 0, pos: 0, vel: 0, alive: true,
-      startTime: performance.now(), canvas, ctx: canvas.getContext('2d'), timeEl,
-    });
+const BODY_TILT_DEADZONE = 4; // degrees of torso lean that count as "upright"
+const BODY_TILT_MAX = 18; // degrees for full effect — real bodies can't lean as far as a phone can tilt
+const BODY_TILT_SMOOTHING = 0.18;
+const GRAVITY_ACCEL = 0.9; // units/sec^2
+const DAMPING = 3.2; // per-second velocity damping
+const FALL_THRESHOLD = 1.2;
+
+const COCO_PAIRS = [
+  ['left_shoulder', 'right_shoulder'], ['left_shoulder', 'left_elbow'], ['left_elbow', 'left_wrist'],
+  ['right_shoulder', 'right_elbow'], ['right_elbow', 'right_wrist'], ['left_shoulder', 'left_hip'],
+  ['right_shoulder', 'right_hip'], ['left_hip', 'right_hip'], ['left_hip', 'left_knee'],
+  ['left_knee', 'left_ankle'], ['right_hip', 'right_knee'], ['right_knee', 'right_ankle'],
+];
+
+function resizeBalanceCanvas() {
+  const wrap = document.getElementById('balance-wrap');
+  const w = Math.max(wrap.clientWidth, 2);
+  const h = Math.max(wrap.clientHeight, 2);
+  bal3dCanvas.width = w; bal3dCanvas.height = h;
+  balOverlay.width = w; balOverlay.height = h;
+}
+
+async function ensureBalanceDetector() {
+  if (balanceDetector) return balanceDetector;
+  await tf.setBackend('webgl');
+  await tf.ready();
+  // eslint-disable-next-line no-undef
+  balanceDetector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, {
+    modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING,
+    enableTracking: true,
+    trackerType: poseDetection.TrackerType.BoundingBox,
   });
-  document.getElementById('balance-status').textContent = 'Tilt your phone to keep the egg on the beam!';
+  return balanceDetector;
+}
+
+async function startBalance() {
+  balanceActive = true;
+  balanceEnded = false;
+  balanceLastTime = null;
+  balanceCameraOk = false;
+  balanceCameraError = null;
+  resizeBalanceCanvas();
+  balanceLanes = players.map((p) => ({
+    id: p.id, name: p.name, angle: 0, targetAngle: 0, pos: 0, vel: 0, alive: true,
+    startTime: performance.now(), screenX: null,
+  }));
+  document.getElementById('balance-status').textContent = 'Stand left-to-right, lean your whole body to balance your egg!';
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+    balanceVideo.srcObject = stream;
+    await balanceVideo.play();
+    balanceCameraOk = true;
+  } catch (err) {
+    balanceCameraOk = false;
+    balanceCameraError = err && err.message ? err.message : String(err);
+    console.error('Balance camera failed:', err);
+  }
+
+  try {
+    await ensureBalanceDetector();
+  } catch (err) {
+    console.error('Could not load pose detector:', err);
+  }
+
   balanceRAF = requestAnimationFrame(balanceLoop);
 }
 
 function stopBalance() {
   balanceActive = false;
   if (balanceRAF) { cancelAnimationFrame(balanceRAF); balanceRAF = null; }
+  if (balanceVideo.srcObject) {
+    balanceVideo.srcObject.getTracks().forEach((t) => t.stop());
+    balanceVideo.srcObject = null;
+  }
 }
 
-socket.on('tilt:update', ({ playerId, gamma }) => {
-  const st = balancePlayers.get(playerId);
-  if (!st || !st.alive) return;
-  let g = gamma || 0;
-  if (Math.abs(g) < TILT_DEADZONE) g = 0;
-  else g -= Math.sign(g) * TILT_DEADZONE; // smooth entry past the deadzone instead of a hard jump
-  st.targetAngle = Math.max(-TILT_MAX, Math.min(TILT_MAX, g));
-});
+function applyPosesToLanes(poses) {
+  const validPoses = poses
+    .filter((p) => p.score === undefined || p.score > 0.25)
+    .map((p) => {
+      const kp = {};
+      p.keypoints.forEach((k) => { kp[k.name] = k; });
+      return kp;
+    })
+    .filter((kp) => kp.left_shoulder && kp.right_shoulder && kp.left_hip && kp.right_hip);
 
-function balanceLoop() {
-  if (!balanceActive) return;
-  let aliveCount = 0;
-  balancePlayers.forEach((st, id) => {
-    if (!st.alive) return;
-    aliveCount++;
-    st.angle += (st.targetAngle - st.angle) * TILT_SMOOTHING;
-    const rad = (st.angle * Math.PI) / 180;
-    st.vel += Math.sin(rad) * GRAVITY * 16;
-    st.vel *= FRICTION;
-    st.pos += st.vel * 16;
-    st.timeEl.textContent = ((performance.now() - st.startTime) / 1000).toFixed(1) + 's';
-    if (Math.abs(st.pos) > FALL_THRESHOLD) {
-      st.alive = false;
-      const survivalMs = performance.now() - st.startTime;
-      socket.emit('balance:eliminated', { playerId: id, survivalMs });
-    }
-    drawLane(st);
+  validPoses.sort((a, b) => (a.left_hip.x + a.right_hip.x) - (b.left_hip.x + b.right_hip.x));
+  posesDetectedCount = validPoses.length;
+
+  balanceLanes.forEach((lane, i) => {
+    const kp = validPoses[i];
+    if (!kp) { lane.screenX = null; return; }
+    const midShoulderX = (kp.left_shoulder.x + kp.right_shoulder.x) / 2;
+    const midShoulderY = (kp.left_shoulder.y + kp.right_shoulder.y) / 2;
+    const midHipX = (kp.left_hip.x + kp.right_hip.x) / 2;
+    const midHipY = (kp.left_hip.y + kp.right_hip.y) / 2;
+    const dx = midShoulderX - midHipX;
+    const dy = midShoulderY - midHipY; // image y grows downward
+    const angleDeg = (Math.atan2(dx, -dy) * 180) / Math.PI;
+    lane.screenX = balanceVideo.videoWidth ? balanceVideo.videoWidth - midHipX : null;
+    lane.keypoints = kp;
+
+    if (!lane.alive) return;
+    let a = angleDeg;
+    if (Math.abs(a) < BODY_TILT_DEADZONE) a = 0;
+    else a -= Math.sign(a) * BODY_TILT_DEADZONE;
+    lane.targetAngle = Math.max(-BODY_TILT_MAX, Math.min(BODY_TILT_MAX, a));
   });
-  if (aliveCount <= (balancePlayers.size > 1 ? 1 : 0) && balancePlayers.size > 0) {
+}
+
+function stepBalancePhysics(dt) {
+  let aliveCount = 0;
+  balanceLanes.forEach((lane) => {
+    if (!lane.alive) return;
+    aliveCount++;
+    lane.angle += (lane.targetAngle - lane.angle) * Math.min(1, BODY_TILT_SMOOTHING * dt * 60);
+    const rad = (lane.angle * Math.PI) / 180;
+    lane.vel += Math.sin(rad) * GRAVITY_ACCEL * dt;
+    lane.vel *= Math.max(0, 1 - DAMPING * dt);
+    lane.pos += lane.vel * dt;
+    if (Math.abs(lane.pos) > FALL_THRESHOLD) {
+      lane.alive = false;
+      const survivalMs = performance.now() - lane.startTime;
+      socket.emit('balance:eliminated', { playerId: lane.id, survivalMs });
+    }
+  });
+  if (balanceLanes.length > 0 && aliveCount <= (balanceLanes.length > 1 ? 1 : 0)) {
     endBalanceIfDone();
   }
-  balanceRAF = requestAnimationFrame(balanceLoop);
 }
 
-function drawLane(st) {
-  const ctx = st.ctx;
-  ctx.clearRect(0, 0, LANE_W, LANE_H);
-  ctx.fillStyle = '#141a2e';
-  ctx.fillRect(0, 0, LANE_W, LANE_H);
-  const cx = LANE_W / 2, cy = LANE_H / 2;
-  const rad = (st.angle * Math.PI) / 180;
+function drawBalanceScene() {
+  const w = bal3dCanvas.width, h = bal3dCanvas.height;
+  bal3dCtx.clearRect(0, 0, w, h);
+  bal3dCtx.fillStyle = '#0b0e1a';
+  bal3dCtx.fillRect(0, 0, w, h);
+
+  if (balanceCameraOk && balanceVideo.videoWidth) {
+    bal3dCtx.save();
+    bal3dCtx.translate(w, 0);
+    bal3dCtx.scale(-1, 1);
+    bal3dCtx.drawImage(balanceVideo, 0, 0, w, h);
+    bal3dCtx.restore();
+  }
+
+  balOverlayCtx.clearRect(0, 0, balOverlay.width, balOverlay.height);
+  if (balanceVideo.videoWidth) drawAllSkeletons();
+
+  const beamY = h * 0.74;
+  const beamHalfLen = w * 0.08;
+  balanceLanes.forEach((lane, i) => {
+    const cx = lane.screenX != null ? (lane.screenX / balanceVideo.videoWidth) * w : w * ((i + 1) / (balanceLanes.length + 1));
+    drawBeam(cx, beamY, beamHalfLen, lane);
+  });
+
+  drawBalanceDebugHud();
+}
+
+function drawAllSkeletons() {
+  balOverlayCtx.save();
+  balOverlayCtx.strokeStyle = 'rgba(79,209,255,0.6)';
+  balOverlayCtx.lineWidth = 2;
+  const w = balOverlay.width, h = balOverlay.height, vw = balanceVideo.videoWidth, vh = balanceVideo.videoHeight;
+  balanceLanes.forEach((lane) => {
+    const kp = lane.keypoints;
+    if (!kp) return;
+    COCO_PAIRS.forEach(([a, b]) => {
+      if (!kp[a] || !kp[b]) return;
+      const ax = w - (kp[a].x / vw) * w, ay = (kp[a].y / vh) * h;
+      const bx = w - (kp[b].x / vw) * w, by = (kp[b].y / vh) * h;
+      balOverlayCtx.beginPath();
+      balOverlayCtx.moveTo(ax, ay);
+      balOverlayCtx.lineTo(bx, by);
+      balOverlayCtx.stroke();
+    });
+  });
+  balOverlayCtx.restore();
+}
+
+function drawBeam(cx, cy, halfLen, lane) {
+  const ctx = bal3dCtx;
   ctx.save();
   ctx.translate(cx, cy);
+  const rad = (lane.angle * Math.PI) / 180;
   ctx.rotate(rad);
-  ctx.strokeStyle = st.alive ? '#4fd1ff' : '#ff5f5f';
+  ctx.strokeStyle = lane.alive ? '#4fd1ff' : '#ff5f5f';
   ctx.lineWidth = 8;
   ctx.beginPath();
-  ctx.moveTo(-BEAM_LEN / 2, 0);
-  ctx.lineTo(BEAM_LEN / 2, 0);
+  ctx.moveTo(-halfLen, 0);
+  ctx.lineTo(halfLen, 0);
   ctx.stroke();
-  if (st.alive) {
-    const eggX = st.pos * (BEAM_LEN / 2);
-    ctx.translate(eggX, -16);
+  if (lane.alive) {
+    const eggX = lane.pos * halfLen;
+    ctx.translate(eggX, -halfLen * 0.16);
     ctx.rotate(-rad);
     ctx.fillStyle = '#fff7e0';
     ctx.beginPath();
-    ctx.ellipse(0, 0, 12, 16, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, halfLen * 0.11, halfLen * 0.15, 0, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore();
-  if (!st.alive) {
-    ctx.fillStyle = '#ff5f5f';
-    ctx.font = 'bold 20px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('OUT', cx, cy);
-  }
+
+  ctx.save();
+  ctx.font = 'bold 16px sans-serif';
+  ctx.textAlign = 'center';
+  const nameLabel = `${lane.name}${lane.alive ? '' : ' — OUT'}`;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(cx - ctx.measureText(nameLabel).width / 2 - 8, cy - halfLen - 34, ctx.measureText(nameLabel).width + 16, 24);
+  ctx.fillStyle = lane.alive ? '#4fd1ff' : '#ff5f5f';
+  ctx.fillText(nameLabel, cx, cy - halfLen - 16);
+  ctx.restore();
 }
 
-let balanceEnded = false;
+function drawBalanceDebugHud() {
+  const ctx = balOverlayCtx;
+  ctx.save();
+  ctx.font = '16px monospace';
+  ctx.textAlign = 'left';
+  const lines = [
+    balanceCameraOk ? 'camera: ok' : `camera: ${balanceCameraError ? 'ERROR - ' + balanceCameraError : 'starting...'}`,
+    balanceDetector ? `bodies detected: ${posesDetectedCount} / ${balanceLanes.length} players` : 'pose model: loading...',
+  ];
+  lines.forEach((line, i) => {
+    const y = 22 + i * 20;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(6, y - 16, ctx.measureText(line).width + 12, 22);
+    ctx.fillStyle = i === 0 && !balanceCameraOk ? '#ff5f5f' : '#4fd1ff';
+    ctx.fillText(line, 12, y);
+  });
+  ctx.restore();
+}
+
+function balanceLoop(now) {
+  if (!balanceActive) return;
+  const dt = balanceLastTime ? Math.min((now - balanceLastTime) / 1000, 0.05) : 0.016;
+  balanceLastTime = now;
+
+  if (!balanceBusy && balanceDetector && balanceVideo.readyState >= 2) {
+    balanceBusy = true;
+    balanceDetector.estimatePoses(balanceVideo)
+      .then((poses) => { applyPosesToLanes(poses); balanceBusy = false; })
+      .catch((e) => { console.error(e); balanceBusy = false; });
+  }
+
+  stepBalancePhysics(dt);
+  drawBalanceScene();
+
+  balanceRAF = requestAnimationFrame(balanceLoop);
+}
+
+socket.on('balance:update', ({ players: p }) => {
+  players = p;
+});
+
 function endBalanceIfDone() {
   if (balanceEnded) return;
   balanceEnded = true;
-  balanceActive = false;
-  const ranking = Array.from(balancePlayers.entries())
-    .map(([id, st]) => ({ id, name: st.name, ms: st.alive ? performance.now() - st.startTime : null }))
+  const ranking = balanceLanes
+    .map((lane) => ({ name: lane.name, ms: lane.alive ? performance.now() - lane.startTime : null }))
     .sort((a, b) => (b.ms ?? 999999) - (a.ms ?? 999999));
   document.getElementById('balance-status').textContent =
     `🏆 ${ranking[0]?.name || '?'} wins! Balanced the longest.`;
 }
-
-document.getElementById('start-bowling').addEventListener('click', () => { balanceEnded = false; });
-document.getElementById('start-balance').addEventListener('click', () => { balanceEnded = false; });
 
 socket.on('host:disconnected', () => {
   alert('Lost connection.');

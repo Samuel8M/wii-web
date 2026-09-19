@@ -25,19 +25,15 @@
 <div id="screen-bowling" class="screen phone-body">
   <h1>🎳 Bowling</h1>
   <div class="status-pill" id="bowling-turn-pill">Waiting…</div>
-  <p class="hint">Watch the big screen. When it's your turn, step up and swing your hand at the webcam like a real bowling ball!</p>
+  <p class="hint">Watch the big screen. When it's your turn, step in front of the camera and swing your whole arm like a real bowling throw!</p>
   <div id="bowling-scores"></div>
 </div>
 
 <div id="screen-balance" class="screen phone-body">
   <h1>🥚 Balance Egg</h1>
-  <button id="enable-tilt-btn" class="big">Start Balancing</button>
-  <div id="tilt-indicator" style="display:none;">
-    <div id="tilt-dot"></div>
-  </div>
-  <div class="status-pill you" id="balance-status-pill" style="display:none;">Balancing…</div>
-  <p class="hint" id="balance-hint">Hold your phone flat like a tray. Tilt left/right to keep the egg centered.</p>
-  <p class="hint" id="no-sensor-msg" style="display:none; color:#ff5f5f;">No motion sensor detected (testing on a laptop?) — drag left/right below instead.</p>
+  <div class="status-pill you" id="balance-lane-pill">You're Lane —</div>
+  <p class="hint">This one's full-body — no phone controls. Stand in front of the camera in your lane's left-to-right order and lean your whole body to balance the egg. Watch this screen for your status.</p>
+  <div class="status-pill" id="balance-status-pill" style="display:none;">Balancing…</div>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>

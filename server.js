@@ -117,15 +117,9 @@ io.on('connection', (socket) => {
     });
   });
 
-  // --- Balance egg: every phone streams tilt continuously; host relays to itself for physics.
-  socket.on('tilt:update', ({ beta, gamma }) => {
-    const room = rooms[socket.data.roomCode];
-    if (!room || socket.data.role !== 'player') return;
-    if (room.hostSocketId) {
-      io.to(room.hostSocketId).emit('tilt:update', { playerId: socket.id, beta, gamma });
-    }
-  });
-
+  // --- Balance egg: fully webcam-driven now (host tracks every player's body
+  // lean directly via multi-person pose detection), so phones only ever
+  // receive status updates here — nothing streams tilt anymore.
   socket.on('balance:eliminated', ({ playerId, survivalMs }) => {
     const room = rooms[socket.data.roomCode];
     if (!room || socket.data.role !== 'host') return;
