@@ -346,7 +346,16 @@ let balanceActive = false;
 let balanceRAF = null;
 let balancePlayers = new Map(); // id -> { name, angle, pos, vel, alive, startTime, canvas, ctx }
 
-const LANE_W = 160, LANE_H = 420, BEAM_LEN = 130, GRAVITY = 0.0009, FRICTION = 0.985;
+const LANE_W = 160, LANE_H = 420, BEAM_LEN = 130;
+// Beginner-friendly physics: gentle pull, strong damping, small tilts ignored,
+// input smoothed so phone jitter doesn't snap the beam around, and a bit of
+// extra room past the ends of the beam before the egg actually falls.
+const GRAVITY = 0.00035;
+const FRICTION = 0.93;
+const TILT_DEADZONE = 5; // degrees of tilt that count as "flat"
+const TILT_MAX = 30; // degrees for full effect (was effectively 45)
+const TILT_SMOOTHING = 0.12; // 0..1, lower = lazier/more forgiving response
+const FALL_THRESHOLD = 1.2; // was 1 — egg can overhang the beam a bit before it's "off"
 
 function startBalance() {
   balanceActive = true;
@@ -367,7 +376,7 @@ function startBalance() {
     wrap.appendChild(timeEl);
     container.appendChild(wrap);
     balancePlayers.set(p.id, {
-      name: p.name, angle: 0, pos: 0, vel: 0, alive: true,
+      name: p.name, angle: 0, targetAngle: 0, pos: 0, vel: 0, alive: true,
       startTime: performance.now(), canvas, ctx: canvas.getContext('2d'), timeEl,
     });
   });
@@ -382,7 +391,11 @@ function stopBalance() {
 
 socket.on('tilt:update', ({ playerId, gamma }) => {
   const st = balancePlayers.get(playerId);
-  if (st && st.alive) st.angle = Math.max(-45, Math.min(45, gamma || 0));
+  if (!st || !st.alive) return;
+  let g = gamma || 0;
+  if (Math.abs(g) < TILT_DEADZONE) g = 0;
+  else g -= Math.sign(g) * TILT_DEADZONE; // smooth entry past the deadzone instead of a hard jump
+  st.targetAngle = Math.max(-TILT_MAX, Math.min(TILT_MAX, g));
 });
 
 function balanceLoop() {
@@ -391,12 +404,13 @@ function balanceLoop() {
   balancePlayers.forEach((st, id) => {
     if (!st.alive) return;
     aliveCount++;
+    st.angle += (st.targetAngle - st.angle) * TILT_SMOOTHING;
     const rad = (st.angle * Math.PI) / 180;
     st.vel += Math.sin(rad) * GRAVITY * 16;
     st.vel *= FRICTION;
     st.pos += st.vel * 16;
     st.timeEl.textContent = ((performance.now() - st.startTime) / 1000).toFixed(1) + 's';
-    if (Math.abs(st.pos) > 1) {
+    if (Math.abs(st.pos) > FALL_THRESHOLD) {
       st.alive = false;
       const survivalMs = performance.now() - st.startTime;
       socket.emit('balance:eliminated', { playerId: id, survivalMs });
