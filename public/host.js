@@ -89,11 +89,15 @@ function mapRange(v, inMin, inMax, outMin, outMax) {
 }
 
 /* =========================================================
-   BOWLING — full-body pose tracking (MediaPipe Pose) reads a real
-   arm-swing motion from the webcam; a 3D scene (Three.js) rolls the
-   ball down a lane at 10 pins, camera gliding along behind it.
+   BOWLING — MediaPipe Holistic tracks the full body AND both hands
+   at once from the webcam. You have to actually grab the ball (make
+   a fist near waist height) before anything happens — it then
+   follows your hand while held — and release it by opening your
+   hand or swinging fast, like letting go of a real ball. A 3D scene
+   (Three.js) rolls the ball down a lane at 10 pins, camera gliding
+   along behind it.
    ========================================================= */
-let bowlingPose = null;
+let bowlingHolistic = null;
 let bowlingCamera = null;
 let bowlingRAF = null;
 let bowlingActive = false;
@@ -104,7 +108,9 @@ const b3dCanvas = document.getElementById('bowling-3d');
 const bOverlay = document.getElementById('bowling-overlay');
 const bOverlayCtx = bOverlay.getContext('2d');
 
-const SWING_TRIGGER = 0.28; // px/ms of downward wrist velocity needed to launch
+const SWING_TRIGGER = 0.28; // px/ms of downward wrist velocity that force-releases the ball
+const GRAB_MIN_Y = 0.5; // normalized — only grab if the hand is down around waist height or lower
+const HOLD_TIMEOUT_MS = 8000; // auto-drop if held without a throw for this long
 const LANE_HALF_WIDTH = 1.4;
 const LANE_LENGTH = 20;
 const PIN_APEX_Z = -15;
@@ -118,12 +124,42 @@ const CAMERA_HOME_Z = 2.4;
 let bScene, bCamera, bRenderer, bBallMesh;
 let pins = [];
 let ball;
-let swingState = 'idle'; // idle -> cooldown
+let ballState = 'idle'; // idle -> held -> thrown -> (reset) idle
+let heldSide = null; // 'left' | 'right'
+let heldSince = 0;
 let wristHistory = { left: [], right: [] };
 let cameraOk = false;
 let cameraError = null;
 let poseDetected = false;
+let leftHandDetected = false;
+let rightHandDetected = false;
 let lastSwingSpeed = 0;
+
+// Rough open/closed-fist heuristic: for each of the 4 non-thumb fingers,
+// compare the fingertip's distance from the wrist to its middle knuckle's
+// distance from the wrist. Curled fingers sit closer to the wrist than
+// their own knuckle does; extended fingers sit farther. Returns true
+// (closed/fist), false (open), or null (not confident enough either way —
+// keep whatever the game was already assuming).
+function isHandClosed(hand) {
+  if (!hand) return null;
+  const wrist = hand[0];
+  const tips = [8, 12, 16, 20];
+  const pips = [6, 10, 14, 18];
+  let curled = 0, total = 0;
+  for (let i = 0; i < 4; i++) {
+    const tip = hand[tips[i]], pip = hand[pips[i]];
+    if (!tip || !pip) continue;
+    total++;
+    const tipDist = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
+    const pipDist = Math.hypot(pip.x - wrist.x, pip.y - wrist.y);
+    if (tipDist < pipDist * 0.92) curled++;
+  }
+  if (total < 3) return null;
+  if (curled >= total - 1) return true;
+  if (curled <= 1) return false;
+  return null;
+}
 
 function ensureBowlingScene() {
   if (bScene) return;
@@ -222,7 +258,8 @@ function resetBall3D() {
 
 function startBowling() {
   bowlingActive = true;
-  swingState = 'idle';
+  ballState = 'idle';
+  heldSide = null;
   wristHistory = { left: [], right: [] };
   bLastTime = null;
   ensureBowlingScene();
@@ -233,22 +270,23 @@ function startBowling() {
   renderScoreboard();
 
   // eslint-disable-next-line no-undef
-  bowlingPose = new Pose({
-    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
+  bowlingHolistic = new Holistic({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`,
   });
-  bowlingPose.setOptions({
+  bowlingHolistic.setOptions({
     modelComplexity: 0,
     smoothLandmarks: true,
+    refineFaceLandmarks: false,
     minDetectionConfidence: 0.6,
     minTrackingConfidence: 0.5,
   });
-  bowlingPose.onResults(onPoseResults);
+  bowlingHolistic.onResults(onHolisticResults);
 
   // eslint-disable-next-line no-undef
   bowlingCamera = new Camera(bVideo, {
     onFrame: async () => {
       cameraOk = true;
-      await bowlingPose.send({ image: bVideo });
+      await bowlingHolistic.send({ image: bVideo });
     },
     width: 640,
     height: 480,
@@ -266,72 +304,106 @@ function stopBowling() {
   bowlingActive = false;
   if (bowlingCamera) { bowlingCamera.stop(); bowlingCamera = null; }
   if (bowlingRAF) { cancelAnimationFrame(bowlingRAF); bowlingRAF = null; }
-  bowlingPose = null;
+  bowlingHolistic = null;
 }
 
-function onPoseResults(results) {
+function onHolisticResults(results) {
+  if (!bowlingActive) return;
+  poseDetected = !!results.poseLandmarks;
+  leftHandDetected = !!results.leftHandLandmarks;
+  rightHandDetected = !!results.rightHandLandmarks;
+
   bOverlayCtx.save();
   bOverlayCtx.clearRect(0, 0, bOverlay.width, bOverlay.height);
   bOverlayCtx.translate(bOverlay.width, 0);
   bOverlayCtx.scale(-1, 1); // mirror so it feels natural
 
   if (results.poseLandmarks) {
-    poseDetected = true;
-    const lm = results.poseLandmarks;
     // eslint-disable-next-line no-undef
-    drawConnectors(bOverlayCtx, lm, POSE_CONNECTIONS, { color: '#4fd1ff', lineWidth: 3 });
-    // eslint-disable-next-line no-undef
-    drawLandmarks(bOverlayCtx, lm, { color: '#ff5fa2', radius: 3 });
-
-    const now = performance.now();
-    pushWrist('left', lm[15], now);
-    pushWrist('right', lm[16], now);
-    evaluateSwing();
-  } else {
-    poseDetected = false;
-    wristHistory.left = [];
-    wristHistory.right = [];
+    drawConnectors(bOverlayCtx, results.poseLandmarks, POSE_CONNECTIONS, { color: '#4fd1ff', lineWidth: 3 });
   }
+  ['left', 'right'].forEach((side) => {
+    const hand = side === 'left' ? results.leftHandLandmarks : results.rightHandLandmarks;
+    if (!hand) return;
+    const color = side === heldSide ? '#4fff8f' : '#ff5fa2';
+    // eslint-disable-next-line no-undef
+    drawConnectors(bOverlayCtx, hand, HAND_CONNECTIONS, { color, lineWidth: 3 });
+    // eslint-disable-next-line no-undef
+    drawLandmarks(bOverlayCtx, hand, { color: '#ffffff', radius: 2 });
+  });
   bOverlayCtx.restore();
+
+  const now = performance.now();
+  if (ballState === 'idle' && !ball.moving) {
+    evaluateGrab(results);
+  } else if (ballState === 'held') {
+    updateHeldBall(results, now);
+  }
+
   drawDebugHud();
 }
 
-function pushWrist(side, lm, now) {
-  if (!lm || (lm.visibility !== undefined && lm.visibility < 0.4)) return;
-  const px = lm.x * bOverlay.width;
-  const py = lm.y * bOverlay.height;
-  const hist = wristHistory[side];
-  hist.push({ x: px, y: py, t: now });
-  if (hist.length > 4) hist.shift();
+function evaluateGrab(results) {
+  for (const side of ['left', 'right']) {
+    const hand = side === 'left' ? results.leftHandLandmarks : results.rightHandLandmarks;
+    if (!hand) continue;
+    if (hand[0].y < GRAB_MIN_Y) continue; // hand held up high — not reaching for the ball
+    if (isHandClosed(hand) === true) {
+      ballState = 'held';
+      heldSide = side;
+      heldSince = performance.now();
+      wristHistory.left = [];
+      wristHistory.right = [];
+      return;
+    }
+  }
 }
 
-function evaluateSwing() {
-  if (!bowlingActive || ball.moving || swingState === 'cooldown') return;
-  const candidates = [];
-  ['left', 'right'].forEach((side) => {
-    const hist = wristHistory[side];
-    if (hist.length < 2) return;
+function updateHeldBall(results, now) {
+  const hand = heldSide === 'left' ? results.leftHandLandmarks : results.rightHandLandmarks;
+  const poseWrist = results.poseLandmarks ? results.poseLandmarks[heldSide === 'left' ? 15 : 16] : null;
+  // The coarse body wrist tracks more reliably than fine finger landmarks
+  // during a fast swing (motion blur), so prefer it for position/velocity.
+  const wristLm = poseWrist || (hand ? hand[0] : null);
+
+  if (wristLm) {
+    const px = wristLm.x * bOverlay.width;
+    const py = wristLm.y * bOverlay.height;
+    const hist = wristHistory[heldSide];
+    hist.push({ x: px, y: py, t: now });
+    if (hist.length > 4) hist.shift();
+
+    // Ball visually follows the holding hand while it's held.
+    ball.x = mapRange(wristLm.x, 0.2, 0.8, LANE_HALF_WIDTH - BALL_RADIUS, -(LANE_HALF_WIDTH - BALL_RADIUS));
+    bBallMesh.position.set(ball.x, BALL_RADIUS, 0);
+  }
+
+  const hist = wristHistory[heldSide];
+  let vx = 0, vy = 0;
+  if (hist.length >= 2) {
     const prev = hist[hist.length - 2];
     const cur = hist[hist.length - 1];
     const dt = cur.t - prev.t;
-    if (dt <= 0) return;
-    candidates.push({ vx: (cur.x - prev.x) / dt, vy: (cur.y - prev.y) / dt });
-  });
-  if (!candidates.length) return;
-  const best = candidates.reduce((a, b) => (b.vy > a.vy ? b : a));
-  lastSwingSpeed = best.vy;
+    if (dt > 0) { vy = (cur.y - prev.y) / dt; vx = (cur.x - prev.x) / dt; }
+  }
+  lastSwingSpeed = vy;
 
-  if (best.vy > SWING_TRIGGER) {
-    launchBall(best.vx, best.vy);
-    swingState = 'cooldown';
-    setTimeout(() => { swingState = 'idle'; }, 1200);
+  const openedHand = isHandClosed(hand) === false;
+  const fastSwing = vy > SWING_TRIGGER;
+
+  if (openedHand || fastSwing) {
+    launchBall(vx, vy);
+    ballState = 'thrown';
+  } else if (now - heldSince > HOLD_TIMEOUT_MS) {
+    ballState = 'idle';
+    heldSide = null;
+    resetBall3D();
   }
 }
 
 function launchBall(vx, vy) {
   ball.vz = mapRange(vy, SWING_TRIGGER, 1.0, 8, 16);
   ball.curveAccel = mapRange(Math.abs(vx), 0, 0.6, 0, 3) * Math.sign(vx);
-  ball.vx = 0;
   ball.moving = true;
 }
 
@@ -392,7 +464,8 @@ function finishRoll(gutter) {
   setTimeout(() => {
     resetPins3D();
     resetBall3D();
-    swingState = 'idle';
+    ballState = 'idle';
+    heldSide = null;
     wristHistory.left = [];
     wristHistory.right = [];
   }, 1600);
@@ -405,6 +478,12 @@ function updateCameraDolly() {
   bCamera.lookAt(0, 0.3, lookZ);
 }
 
+function ballStateLabel() {
+  if (ballState === 'idle') return 'make a fist below your waist to GRAB the ball';
+  if (ballState === 'held') return `HELD (${heldSide} hand) — swing & open your hand to RELEASE`;
+  return 'rolling...';
+}
+
 function drawDebugHud() {
   const ctx = bOverlayCtx;
   ctx.save();
@@ -412,8 +491,9 @@ function drawDebugHud() {
   ctx.textAlign = 'left';
   const lines = [
     cameraOk ? 'camera: ok' : `camera: ${cameraError ? 'ERROR - ' + cameraError : 'starting...'}`,
-    `pose: ${poseDetected ? 'detected' : 'not detected - step into frame'}`,
-    `swing speed: ${lastSwingSpeed.toFixed(2)} (trigger @ ${SWING_TRIGGER})`,
+    `pose: ${poseDetected ? 'detected' : 'not detected - step into frame'}  hands: L${leftHandDetected ? '✓' : '-'} R${rightHandDetected ? '✓' : '-'}`,
+    `ball: ${ballStateLabel()}`,
+    `swing speed: ${lastSwingSpeed.toFixed(2)} (release @ ${SWING_TRIGGER})`,
   ];
   lines.forEach((line, i) => {
     const y = 22 + i * 20;
